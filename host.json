@@ -6,9 +6,9 @@
   },
   "extensions": {
     "mcp": {
-      "serverName": "TutorMatematicoMCP",
+      "serverName": "MCPTeams",
       "serverVersion": "1.0.0",
-      "instructions": "Servidor MCP de prueba para validar respuestas del agente."
+      "instructions": "Servidor MCP para enviar respuestas y publicar mensajes en Microsoft Teams."
     }
   }
 }

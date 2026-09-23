@@ -8,16 +8,12 @@
     }
   ],
   "servers": {
-   // "local-mcp-function": {
-     // "type": "http",
-      //"url": "http://localhost:7071/runtime/webhooks/mcp"
-    //},
-    "azure-mcp-function": {
-  "type": "http",
-  "url": "https://mcp-tutor-matematico-dev-gzama8c8gdhxdgd9.westus3-01.azurewebsites.net/runtime/webhooks/mcp",
-  "headers": {
-    "x-functions-key": "${input:functions-mcp-extension-system-key}"
-  }
-}
+    "mcp-teams": {
+      "type": "http",
+      "url": "https://mcp-teams-btfmfpgdbbdbfcf9.eastus-01.azurewebsites.net/runtime/webhooks/mcp",
+      "headers": {
+        "x-functions-key": "${input:functions-mcp-extension-system-key}"
+      }
+    }
   }
 }

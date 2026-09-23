@@ -1,55 +1,42 @@
-import azure.functions as func
 import json
 import logging
 import os
+
+import azure.functions as func
 import requests
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-tool_properties = json.dumps([
-    {
-        "propertyName": "respuesta",
-        "propertyType": "string",
-        "description": "Respuesta final generada por el agente.",
-        "isRequired": True
-    },
-    {
-        "propertyName": "correlation_id",
-        "propertyType": "string",
-        "description": "Identificador utilizado para trazabilidad.",
-        "isRequired": True
-    }
-])
+MAX_RESPUESTA_LENGTH = 20_000
+MAX_CORRELATION_ID_LENGTH = 256
+MAX_TITULO_LENGTH = 200
+MAX_MENSAJE_LENGTH = 20_000
 
 
-@app.mcp_tool_trigger(
-    arg_name="context",
-    tool_name="enviar_respuesta_prueba",
-    description="Recibe la respuesta final del agente para validar la integración MCP.",
-    tool_properties=tool_properties,
-)
-def enviar_respuesta_prueba(context) -> str:
+class InvalidArguments(ValueError):
+    pass
+
+
+def _arguments(context):
     try:
         content = json.loads(context)
-        args = content.get("arguments", {})
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise InvalidArguments("contexto MCP inválido") from exc
 
-        respuesta = args.get("respuesta")
-        correlation_id = args.get("correlation_id")
+    if not isinstance(content, dict) or not isinstance(content.get("arguments"), dict):
+        raise InvalidArguments("argumentos MCP inválidos")
 
-        logging.info(
-            "MCP ejecutado. correlation_id=%s respuesta=%s",
-            correlation_id,
-            respuesta
-        )
+    return content["arguments"]
 
-        return (
-            f"Respuesta recibida correctamente. "
-            f"correlation_id={correlation_id}"
-        )
 
-    except Exception as e:
-        logging.exception("Error ejecutando herramienta MCP")
-        return f"Error ejecutando herramienta MCP: {str(e)}"
+def _required_text(args, name, max_length):
+    value = args.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidArguments(f"falta {name} o no es texto")
+    if len(value) > max_length:
+        raise InvalidArguments(f"{name} supera el tamaño permitido")
+    return value
+
 teams_tool_properties = json.dumps([
     {
         "propertyName": "respuesta",
@@ -74,63 +61,47 @@ teams_tool_properties = json.dumps([
 )
 def enviar_respuesta_teams(context) -> str:
     try:
-        content = json.loads(context)
-        args = content.get("arguments", {})
-
-        respuesta = args.get("respuesta")
-        correlation_id = args.get("correlation_id")
-
-        if not respuesta or not correlation_id:
-            return "Error: faltan respuesta o correlation_id"
+        args = _arguments(context)
+        respuesta = _required_text(args, "respuesta", MAX_RESPUESTA_LENGTH)
+        correlation_id = _required_text(args, "correlation_id", MAX_CORRELATION_ID_LENGTH)
 
         callback_url = os.getenv("TEAMS_CALLBACK_URL")
         callback_key = os.getenv("TEAMS_CALLBACK_KEY")
 
         if not callback_url:
             return "Error: TEAMS_CALLBACK_URL no configurada"
-
         if not callback_key:
             return "Error: TEAMS_CALLBACK_KEY no configurada"
 
         response = requests.post(
             callback_url,
-            json={
-                "respuesta": respuesta,
-                "correlation_id": correlation_id
-            },
-            headers={
-                "x-callback-key": callback_key
-            },
-            timeout=30
+            json={"respuesta": respuesta, "correlation_id": correlation_id},
+            headers={"x-callback-key": callback_key},
+            timeout=30,
+            allow_redirects=False,
         )
 
-        if response.status_code != 200:
+        if not 200 <= response.status_code < 300:
             logging.error(
-                "Error enviando respuesta a Teams. "
-                "correlation_id=%s status=%s body=%s",
-                correlation_id,
+                "Error enviando respuesta a Teams. correlation_id=%r status=%s",
+                correlation_id[:128],
                 response.status_code,
-                response.text
             )
+            return f"Error enviando respuesta a Teams. HTTP {response.status_code}"
 
-            return (
-                f"Error enviando respuesta a Teams. "
-                f"HTTP {response.status_code}"
-            )
+        logging.info("Respuesta enviada a Teams. correlation_id=%r", correlation_id[:128])
+        return f"Respuesta enviada correctamente a Teams. correlation_id={correlation_id}"
 
-        logging.info(
-            "Respuesta enviada a Teams. correlation_id=%s",
-            correlation_id
-        )
+    except InvalidArguments as exc:
+        return f"Error: {exc}"
+    except requests.RequestException as exc:
+        logging.error("Error de conexión al callback de Teams: %s", type(exc).__name__)
+        return "Error de conexión al callback de Teams"
+    except Exception as exc:
+        logging.error("Error ejecutando enviar_respuesta_teams: %s", type(exc).__name__)
+        return "Error ejecutando enviar_respuesta_teams"
 
-        return (
-            f"Respuesta enviada correctamente a Teams. "
-            f"correlation_id={correlation_id}"
-        )
 
-    except Exception as e:
-        logging.exception("Error ejecutando enviar_respuesta_teams")
-        return f"Error ejecutando enviar_respuesta_teams: {str(e)}"
 publicar_teams_properties = json.dumps([
     {
         "propertyName": "titulo",
@@ -158,17 +129,11 @@ publicar_teams_properties = json.dumps([
 )
 def publicar_mensaje_teams(context) -> str:
     try:
-        content = json.loads(context)
-        args = content.get("arguments", {})
-
-        titulo = args.get("titulo")
-        mensaje = args.get("mensaje")
-
-        if not titulo or not mensaje:
-            return "Error: faltan titulo o mensaje"
+        args = _arguments(context)
+        titulo = _required_text(args, "titulo", MAX_TITULO_LENGTH)
+        mensaje = _required_text(args, "mensaje", MAX_MENSAJE_LENGTH)
 
         webhook_url = os.getenv("TEAMS_CHANNEL_WEBHOOK_URL")
-
         if not webhook_url:
             return "Error: TEAMS_CHANNEL_WEBHOOK_URL no configurada"
 
@@ -187,44 +152,35 @@ def publicar_mensaje_teams(context) -> str:
                                 "text": titulo,
                                 "weight": "Bolder",
                                 "size": "Medium",
-                                "wrap": True
+                                "wrap": True,
                             },
                             {
                                 "type": "TextBlock",
                                 "text": mensaje,
-                                "wrap": True
-                            }
-                        ]
-                    }
+                                "wrap": True,
+                            },
+                        ],
+                    },
                 }
-            ]
+            ],
         }
 
         response = requests.post(
-            webhook_url,
-            json=payload,
-            timeout=30
+            webhook_url, json=payload, timeout=30, allow_redirects=False
         )
 
-        if response.status_code not in (200, 202):
-            logging.error(
-                "Error publicando en Teams. status=%s body=%s",
-                response.status_code,
-                response.text
-            )
+        if not 200 <= response.status_code < 300:
+            logging.error("Error publicando en Teams. status=%s", response.status_code)
+            return f"Error publicando mensaje en Teams. HTTP {response.status_code}"
 
-            return (
-                f"Error publicando mensaje en Teams. "
-                f"HTTP {response.status_code}"
-            )
+        logging.info("Solicitud de publicación aceptada por Teams Workflow")
+        return "Solicitud de publicación aceptada por Teams Workflow."
 
-        logging.info(
-            "Mensaje publicado correctamente en Teams. titulo=%s",
-            titulo
-        )
-
-        return "Mensaje publicado correctamente en Microsoft Teams."
-
-    except Exception as e:
-        logging.exception("Error ejecutando publicar_mensaje_teams")
-        return f"Error ejecutando publicar_mensaje_teams: {str(e)}"
+    except InvalidArguments as exc:
+        return f"Error: {exc}"
+    except requests.RequestException as exc:
+        logging.error("Error de conexión al webhook de Teams: %s", type(exc).__name__)
+        return "Error de conexión al webhook de Teams"
+    except Exception as exc:
+        logging.error("Error ejecutando publicar_mensaje_teams: %s", type(exc).__name__)
+        return "Error ejecutando publicar_mensaje_teams"
