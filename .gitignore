@@ -1,0 +1,51 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+
+# =========================
+# Virtual environment
+# =========================
+.venv/
+venv/
+
+# =========================
+# Azure Functions
+# =========================
+.python_packages/
+local.settings.json
+
+# =========================
+# Environment variables / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# VS Code
+# Ignorar configuración local,
+# excepto la configuración MCP
+# =========================
+.vscode/*
+!.vscode/mcp.json
+
+# =========================
+# Azurite local storage
+# =========================
+__azurite*
+__blobstorage__/
+__queuestorage__/
+
+# =========================
+# Azure deployment artifacts
+# =========================
+.azure/
+
+# =========================
+# Operating System
+# =========================
+.DS_Store
+Thumbs.db
