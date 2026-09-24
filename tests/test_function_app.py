@@ -120,15 +120,32 @@ class TeamsToolsTests(unittest.TestCase):
         self.assertIn("HTTP 500", result)
         self.assertNotIn("secret-in-body", " ".join(logs.output))
 
-    def test_transport_error_does_not_expose_webhook_url(self):
-        requests.post.side_effect = requests.RequestException("https://example.test/secret")
-        with patch.dict(os.environ, {"TEAMS_CHANNEL_WEBHOOK_URL": "https://example.test/secret"}):
+    def test_transport_error_does_not_expose_publish_url(self):
+        requests.post.side_effect = requests.RequestException(
+        "https://example.test/api/teams-publish?secret=private"
+    )
+
+        with patch.dict(
+        os.environ,
+        {
+            "TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+            "TEAMS_PUBLISH_KEY": "private-key",
+        }
+    ):
             with self.assertLogs(level="ERROR") as logs:
                 result = function_app.publicar_mensaje_teams(
-                    context(titulo="Aviso", mensaje="hola")
+                context(
+                    destino="transformacion_digital",
+                    mensaje="hola"
                 )
+            )
+
         self.assertIn("Error de conexión", result)
-        self.assertNotIn("secret", result + " ".join(logs.output))
+        self.assertNotIn("private-key", result + " ".join(logs.output))
+        self.assertNotIn(
+        "api/teams-publish?secret=private",
+        result + " ".join(logs.output)
+    )
 
     def test_unexpected_error_does_not_expose_details(self):
         requests.post.side_effect = RuntimeError("private-token")
@@ -139,24 +156,55 @@ class TeamsToolsTests(unittest.TestCase):
                 )
         self.assertNotIn("private-token", result + " ".join(logs.output))
 
-    def test_workflow_accepts_202_without_claiming_publication(self):
-        requests.post.return_value = types.SimpleNamespace(status_code=202)
-        with patch.dict(os.environ, {"TEAMS_CHANNEL_WEBHOOK_URL": "https://example.test"}):
-            result = function_app.publicar_mensaje_teams(
-                context(titulo="Aviso", mensaje="hola")
-            )
-        self.assertIn("aceptada", result)
-        self.assertNotIn("publicado correctamente", result)
-        self.assertEqual(requests.post.call_args.kwargs["json"]["type"], "message")
-        self.assertFalse(requests.post.call_args.kwargs["allow_redirects"])
+    def test_publish_sends_expected_payload(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=200)
 
-    def test_workflow_accepts_other_success_statuses(self):
-        requests.post.return_value = types.SimpleNamespace(status_code=201)
-        with patch.dict(os.environ, {"TEAMS_CHANNEL_WEBHOOK_URL": "https://example.test"}):
+        with patch.dict(
+        os.environ,
+        {
+            "TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+            "TEAMS_PUBLISH_KEY": "publish-key",
+        }
+    ):
             result = function_app.publicar_mensaje_teams(
-                context(titulo="Aviso", mensaje="hola")
+            context(
+                destino="transformacion_digital",
+                mensaje="hola"
             )
-        self.assertIn("aceptada", result)
+        )
+
+        self.assertIn("publicado correctamente", result)
+
+        requests.post.assert_called_once_with(
+        "https://example.test/api/teams-publish",
+        json={
+            "destino": "transformacion_digital",
+            "mensaje": "hola",
+        },
+        headers={
+            "x-publish-key": "publish-key",
+        },
+        timeout=30,
+        allow_redirects=False,
+    )
+    def test_publish_accepts_other_success_statuses(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=201)
+
+        with patch.dict(
+        os.environ,
+        {
+            "TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+            "TEAMS_PUBLISH_KEY": "publish-key",
+        }
+    ):
+            result = function_app.publicar_mensaje_teams(
+            context(
+                destino="transformacion_digital",
+                mensaje="hola"
+            )
+        )
+
+        self.assertIn("publicado correctamente", result)
 
 
 if __name__ == "__main__":
