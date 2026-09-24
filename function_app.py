@@ -9,7 +9,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 MAX_RESPUESTA_LENGTH = 20_000
 MAX_CORRELATION_ID_LENGTH = 256
-MAX_TITULO_LENGTH = 200
+MAX_DESTINO_LENGTH = 100
 MAX_MENSAJE_LENGTH = 20_000
 
 
@@ -104,9 +104,12 @@ def enviar_respuesta_teams(context) -> str:
 
 publicar_teams_properties = json.dumps([
     {
-        "propertyName": "titulo",
+        "propertyName": "destino",
         "propertyType": "string",
-        "description": "Título del mensaje que se publicará en Microsoft Teams.",
+        "description": (
+            "Alias del destino autorizado de Microsoft Teams. "
+            "Por ejemplo: transformacion_digital."
+        ),
         "isRequired": True
     },
     {
@@ -122,65 +125,84 @@ publicar_teams_properties = json.dumps([
     arg_name="context",
     tool_name="publicar_mensaje_teams",
     description=(
-        "Publica un mensaje en un canal autorizado de Microsoft Teams "
-        "mediante un Teams Workflow."
+        "Publica un mensaje en un destino autorizado de Microsoft Teams "
+        "utilizando su alias de destino."
     ),
     tool_properties=publicar_teams_properties,
 )
 def publicar_mensaje_teams(context) -> str:
     try:
         args = _arguments(context)
-        titulo = _required_text(args, "titulo", MAX_TITULO_LENGTH)
-        mensaje = _required_text(args, "mensaje", MAX_MENSAJE_LENGTH)
 
-        webhook_url = os.getenv("TEAMS_CHANNEL_WEBHOOK_URL")
-        if not webhook_url:
-            return "Error: TEAMS_CHANNEL_WEBHOOK_URL no configurada"
+        destino = _required_text(
+            args,
+            "destino",
+            MAX_DESTINO_LENGTH
+        )
 
-        payload = {
-            "type": "message",
-            "attachments": [
-                {
-                    "contentType": "application/vnd.microsoft.card.adaptive",
-                    "content": {
-                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "type": "AdaptiveCard",
-                        "version": "1.4",
-                        "body": [
-                            {
-                                "type": "TextBlock",
-                                "text": titulo,
-                                "weight": "Bolder",
-                                "size": "Medium",
-                                "wrap": True,
-                            },
-                            {
-                                "type": "TextBlock",
-                                "text": mensaje,
-                                "wrap": True,
-                            },
-                        ],
-                    },
-                }
-            ],
-        }
+        mensaje = _required_text(
+            args,
+            "mensaje",
+            MAX_MENSAJE_LENGTH
+        )
+
+        publish_url = os.getenv("TEAMS_PUBLISH_URL")
+        publish_key = os.getenv("TEAMS_PUBLISH_KEY")
+
+        if not publish_url:
+            return "Error: TEAMS_PUBLISH_URL no configurada"
+
+        if not publish_key:
+            return "Error: TEAMS_PUBLISH_KEY no configurada"
 
         response = requests.post(
-            webhook_url, json=payload, timeout=30, allow_redirects=False
+            publish_url,
+            json={
+                "destino": destino,
+                "mensaje": mensaje
+            },
+            headers={
+                "x-publish-key": publish_key
+            },
+            timeout=30,
+            allow_redirects=False,
         )
 
         if not 200 <= response.status_code < 300:
-            logging.error("Error publicando en Teams. status=%s", response.status_code)
-            return f"Error publicando mensaje en Teams. HTTP {response.status_code}"
+            logging.error(
+                "Error publicando en Teams. destino=%r status=%s",
+                destino[:100],
+                response.status_code,
+            )
 
-        logging.info("Solicitud de publicación aceptada por Teams Workflow")
-        return "Solicitud de publicación aceptada por Teams Workflow."
+            return (
+                "Error publicando mensaje en Teams. "
+                f"HTTP {response.status_code}"
+            )
+
+        logging.info(
+            "Mensaje publicado correctamente en Teams. destino=%r",
+            destino[:100],
+        )
+
+        return (
+            "Mensaje publicado correctamente en Teams. "
+            f"destino={destino}"
+        )
 
     except InvalidArguments as exc:
         return f"Error: {exc}"
+
     except requests.RequestException as exc:
-        logging.error("Error de conexión al webhook de Teams: %s", type(exc).__name__)
-        return "Error de conexión al webhook de Teams"
+        logging.error(
+            "Error de conexión al Teams Adapter: %s",
+            type(exc).__name__
+        )
+        return "Error de conexión al Teams Adapter"
+
     except Exception as exc:
-        logging.error("Error ejecutando publicar_mensaje_teams: %s", type(exc).__name__)
+        logging.error(
+            "Error ejecutando publicar_mensaje_teams: %s",
+            type(exc).__name__
+        )
         return "Error ejecutando publicar_mensaje_teams"
