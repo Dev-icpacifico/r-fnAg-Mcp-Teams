@@ -12,6 +12,12 @@ MAX_CORRELATION_ID_LENGTH = 256
 MAX_DESTINO_LENGTH = 100
 MAX_MENSAJE_LENGTH = 20_000
 
+CALLBACK_ERROR_MESSAGES = {
+    404: "la solicitud no existe",
+    409: "la solicitud ya fue respondida",
+    410: "la solicitud expiró",
+}
+
 
 class InvalidArguments(ValueError):
     pass
@@ -87,7 +93,11 @@ def enviar_respuesta_teams(context) -> str:
                 correlation_id[:128],
                 response.status_code,
             )
-            return f"Error enviando respuesta a Teams. HTTP {response.status_code}"
+            detail = CALLBACK_ERROR_MESSAGES.get(response.status_code)
+            return (
+                f"Error enviando respuesta a Teams. HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
 
         logging.info("Respuesta enviada a Teams. correlation_id=%r", correlation_id[:128])
         return f"Respuesta enviada correctamente a Teams. correlation_id={correlation_id}"
@@ -117,8 +127,23 @@ publicar_teams_properties = json.dumps([
         "propertyType": "string",
         "description": "Contenido del mensaje que se publicará en Microsoft Teams.",
         "isRequired": True
+    },
+    {
+        "propertyName": "correlation_id",
+        "propertyType": "string",
+        "description": (
+            "Identificador de la solicitud de Teams que originó la publicación. "
+            "Enviarlo siempre que exista: el destino debe pertenecer a la misma "
+            "área que esa solicitud (ver destinos_permitidos en la solicitud)."
+        ),
+        "isRequired": False
     }
 ])
+
+PUBLISH_ERROR_MESSAGES = {
+    403: "el destino no está autorizado para esta solicitud o su área",
+    404: "el destino no existe",
+}
 
 
 @app.mcp_tool_trigger(
@@ -126,7 +151,8 @@ publicar_teams_properties = json.dumps([
     tool_name="publicar_mensaje_teams",
     description=(
         "Publica un mensaje en un destino autorizado de Microsoft Teams "
-        "utilizando su alias de destino."
+        "utilizando su alias de destino. Sólo se permiten destinos del área "
+        "de la solicitud indicada por correlation_id."
     ),
     tool_properties=publicar_teams_properties,
 )
@@ -146,6 +172,14 @@ def publicar_mensaje_teams(context) -> str:
             MAX_MENSAJE_LENGTH
         )
 
+        correlation_id = None
+        if args.get("correlation_id") not in (None, ""):
+            correlation_id = _required_text(
+                args,
+                "correlation_id",
+                MAX_CORRELATION_ID_LENGTH
+            )
+
         publish_url = os.getenv("TEAMS_PUBLISH_URL")
         publish_key = os.getenv("TEAMS_PUBLISH_KEY")
 
@@ -155,12 +189,17 @@ def publicar_mensaje_teams(context) -> str:
         if not publish_key:
             return "Error: TEAMS_PUBLISH_KEY no configurada"
 
+        payload = {
+            "destino": destino,
+            "mensaje": mensaje
+        }
+
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+
         response = requests.post(
             publish_url,
-            json={
-                "destino": destino,
-                "mensaje": mensaje
-            },
+            json=payload,
             headers={
                 "x-publish-key": publish_key
             },
@@ -175,9 +214,12 @@ def publicar_mensaje_teams(context) -> str:
                 response.status_code,
             )
 
+            detail = PUBLISH_ERROR_MESSAGES.get(response.status_code)
+
             return (
                 "Error publicando mensaje en Teams. "
                 f"HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
             )
 
         logging.info(

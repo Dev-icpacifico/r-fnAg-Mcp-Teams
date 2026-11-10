@@ -207,5 +207,66 @@ class TeamsToolsTests(unittest.TestCase):
         self.assertIn("publicado correctamente", result)
 
 
+
+class PublishCorrelationTests(unittest.TestCase):
+    ENV = {
+        "TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+        "TEAMS_PUBLISH_KEY": "publish-key",
+    }
+
+    def setUp(self):
+        requests.post.reset_mock()
+        requests.post.side_effect = None
+
+    def test_publish_forwards_correlation_id(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=200)
+        with patch.dict(os.environ, self.ENV):
+            result = function_app.publicar_mensaje_teams(
+                context(destino="rrhh_reportes", mensaje="informe", correlation_id="abc-123")
+            )
+        self.assertIn("publicado correctamente", result)
+        self.assertEqual(
+            requests.post.call_args.kwargs["json"],
+            {"destino": "rrhh_reportes", "mensaje": "informe", "correlation_id": "abc-123"},
+        )
+
+    def test_empty_correlation_id_is_omitted(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=200)
+        with patch.dict(os.environ, self.ENV):
+            function_app.publicar_mensaje_teams(
+                context(destino="rrhh_reportes", mensaje="informe", correlation_id="")
+            )
+        self.assertNotIn("correlation_id", requests.post.call_args.kwargs["json"])
+
+    def test_invalid_correlation_id_does_not_send(self):
+        with patch.dict(os.environ, self.ENV):
+            for value in (42, "   ", "x" * 257):
+                result = function_app.publicar_mensaje_teams(
+                    context(destino="rrhh_reportes", mensaje="informe", correlation_id=value)
+                )
+                self.assertIn("Error:", result)
+        requests.post.assert_not_called()
+
+    def test_forbidden_destination_is_explained(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=403, text="detalle interno")
+        with patch.dict(os.environ, self.ENV):
+            with self.assertLogs(level="ERROR"):
+                result = function_app.publicar_mensaje_teams(
+                    context(destino="contabilidad", mensaje="informe", correlation_id="abc")
+                )
+        self.assertIn("HTTP 403", result)
+        self.assertIn("no está autorizado", result)
+        self.assertNotIn("detalle interno", result)
+
+    def test_callback_already_answered_is_explained(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=409)
+        with patch.dict(os.environ, {"TEAMS_CALLBACK_URL": "https://example.test", "TEAMS_CALLBACK_KEY": "key"}):
+            with self.assertLogs(level="ERROR"):
+                result = function_app.enviar_respuesta_teams(
+                    context(respuesta="hola", correlation_id="abc")
+                )
+        self.assertIn("ya fue respondida", result)
+
+
 if __name__ == "__main__":
     unittest.main()

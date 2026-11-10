@@ -1,0 +1,63 @@
+name: Validate and deploy MCP Teams Function to DEV
+
+# Despliega ramas de trabajo al ambiente DEV. Nunca despliega main ni
+# usa el perfil de publicación de producción.
+#
+# Configuración requerida en GitHub (Settings > Secrets and variables > Actions):
+#   - Variable MCP_TEAMS_DEV_APP: nombre de la Function App DEV (Flex Consumption).
+#   - Secreto AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DEV: perfil de publicación de esa Function.
+# Mientras no existan, el despliegue se omite y sólo corren las validaciones.
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Python 3.12 Function
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Verify Azure Functions can load the app
+        run: python -c "import function_app"
+
+  deploy-dev:
+    name: Deploy to DEV
+    if: github.ref != 'refs/heads/main' && vars.MCP_TEAMS_DEV_APP != ''
+    needs: validate
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-mcp-teams-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare deployment package
+        run: |
+          mkdir deploy
+          cp function_app.py host.json requirements.txt deploy/
+
+      - name: Deploy Function App (DEV)
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.MCP_TEAMS_DEV_APP }}
+          package: ./deploy
+          sku: flexconsumption
+          remote-build: true
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DEV }}
