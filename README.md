@@ -19,6 +19,7 @@ Si se renueva el publish profile, reemplaza también el secreto de GitHub.
 
 - `enviar_respuesta_teams(respuesta, correlation_id)`: responde en la conversación que originó la solicitud. Admite una respuesta por solicitud cuando el adaptador opera por áreas.
 - `publicar_mensaje_teams(destino, mensaje, correlation_id?)`: publica en un alias de destino. Con el adaptador en modo multiagente por áreas, el destino debe pertenecer al área de la solicitud indicada por `correlation_id`; sin él sólo se aceptan destinos de áreas que lo permitan expresamente.
+- `publicar_en_canal_teams(destino, mensaje)`: publicación iniciada desde ChatGPT (tarea programada o pedido directo), sin solicitud de Teams. La autoriza la identidad de Entra de la cuenta conectada al complemento: APIM toma el `oid` del token validado y lo entrega en el encabezado `x-icp-caller-oid` y en el argumento `_icp_caller_oid`, sobrescribiendo cualquier valor del cliente. La Function lo reenvía como `caller_oid` a `POST /api/teams-publish-direct` del adaptador, que exige la regla `directPublish` del área. Usa `TEAMS_PUBLISH_DIRECT_URL` o, si falta, deriva la URL desde `TEAMS_PUBLISH_URL`.
 
 ## Ambiente DEV
 

@@ -8,7 +8,7 @@
     "mcp": {
       "serverName": "MCPTeams",
       "serverVersion": "1.0.0",
-      "instructions": "Servidor MCP para enviar respuestas y publicar mensajes en Microsoft Teams."
+      "instructions": "Servidor MCP para enviar respuestas y publicar mensajes en Microsoft Teams. Si la solicitud llegó desde Teams usa enviar_respuesta_teams y publicar_mensaje_teams con su correlation_id; si la publicación se inicia desde ChatGPT sin correlation_id usa publicar_en_canal_teams."
     }
   }
 }

@@ -51,7 +51,7 @@ class TeamsToolsTests(unittest.TestCase):
     def test_only_teams_tools_are_registered(self):
         self.assertEqual(
             set(function_app.app.tool_names),
-            {"enviar_respuesta_teams", "publicar_mensaje_teams"},
+            {"enviar_respuesta_teams", "publicar_mensaje_teams", "publicar_en_canal_teams"},
         )
 
     def test_server_metadata_describes_teams(self):
@@ -270,3 +270,100 @@ class PublishCorrelationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+OID = "AbCdEf01-2345-6789-abcd-ef0123456789"
+DIRECT_ENV = {
+    "TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+    "TEAMS_PUBLISH_KEY": "key",
+}
+
+
+def direct_context(arguments, headers=None, transport=True):
+    content = {"arguments": arguments}
+    if headers is not None:
+        if transport:
+            content["transport"] = {"name": "http-streamable", "properties": {"headers": headers}}
+        else:
+            content["headers"] = headers
+    return json.dumps(content)
+
+
+class DirectPublishTests(unittest.TestCase):
+    def setUp(self):
+        requests.post.reset_mock()
+        requests.post.side_effect = None
+        requests.post.return_value = types.SimpleNamespace(status_code=200)
+
+    def call(self, ctx, env=DIRECT_ENV):
+        with patch.dict(os.environ, env, clear=True):
+            return function_app.publicar_en_canal_teams(ctx)
+
+    def test_uses_caller_from_transport_header(self):
+        result = self.call(direct_context(
+            {"destino": "td_publicaciones", "mensaje": "hola"},
+            headers={"X-ICP-Caller-Oid": OID},
+        ))
+        self.assertIn("correctamente", result)
+        requests.post.assert_called_once_with(
+            "https://example.test/api/teams-publish-direct",
+            json={"destino": "td_publicaciones", "mensaje": "hola", "caller_oid": OID.lower()},
+            headers={"x-publish-key": "key"},
+            timeout=30,
+            allow_redirects=False,
+        )
+
+    def test_header_wins_over_argument(self):
+        other = "11111111-2222-3333-4444-555555555555"
+        self.call(direct_context(
+            {"destino": "td", "mensaje": "hola", "_icp_caller_oid": other},
+            headers={"x-icp-caller-oid": [OID]},
+        ))
+        self.assertEqual(requests.post.call_args.kwargs["json"]["caller_oid"], OID.lower())
+
+    def test_falls_back_to_injected_argument(self):
+        self.call(direct_context({"destino": "td", "mensaje": "hola", "_icp_caller_oid": OID}))
+        self.assertEqual(requests.post.call_args.kwargs["json"]["caller_oid"], OID.lower())
+
+    def test_top_level_headers_are_read(self):
+        self.call(direct_context({"destino": "td", "mensaje": "hola"},
+                                 headers={"x-icp-caller-oid": OID}, transport=False))
+        self.assertEqual(requests.post.call_args.kwargs["json"]["caller_oid"], OID.lower())
+
+    def test_missing_or_invalid_caller_does_not_send(self):
+        for ctx in (
+            direct_context({"destino": "td", "mensaje": "hola"}),
+            direct_context({"destino": "td", "mensaje": "hola", "_icp_caller_oid": "admin"}),
+            direct_context({"destino": "td", "mensaje": "hola"}, headers={"x-icp-caller-oid": ""}),
+        ):
+            with self.assertLogs(level="ERROR"):
+                result = self.call(ctx)
+            self.assertIn("no se pudo identificar", result)
+        requests.post.assert_not_called()
+
+    def test_explicit_direct_url_is_used(self):
+        env = {**DIRECT_ENV, "TEAMS_PUBLISH_DIRECT_URL": "https://other.test/direct"}
+        self.call(direct_context({"destino": "td", "mensaje": "hola", "_icp_caller_oid": OID}), env)
+        self.assertEqual(requests.post.call_args.args[0], "https://other.test/direct")
+
+    def test_missing_configuration(self):
+        ctx = direct_context({"destino": "td", "mensaje": "hola", "_icp_caller_oid": OID})
+        self.assertIn("TEAMS_PUBLISH_DIRECT_URL", self.call(ctx, {"TEAMS_PUBLISH_KEY": "key"}))
+        self.assertIn("TEAMS_PUBLISH_KEY", self.call(ctx, {"TEAMS_PUBLISH_URL": DIRECT_ENV["TEAMS_PUBLISH_URL"]}))
+        requests.post.assert_not_called()
+
+    def test_forbidden_is_explained_without_leaking_message(self):
+        requests.post.return_value = types.SimpleNamespace(status_code=403, text="detalle interno")
+        with self.assertLogs(level="ERROR") as logs:
+            result = self.call(direct_context(
+                {"destino": "td", "mensaje": "contenido privado", "_icp_caller_oid": OID}))
+        self.assertIn("HTTP 403", result)
+        self.assertIn("no está autorizada", result)
+        joined = " ".join(logs.output)
+        self.assertNotIn("contenido privado", joined)
+        self.assertNotIn("detalle interno", joined)
+
+    def test_invalid_arguments_do_not_send(self):
+        for ctx in ("{", direct_context({"destino": "", "mensaje": "hola", "_icp_caller_oid": OID})):
+            self.assertIn("Error:", self.call(ctx))
+        requests.post.assert_not_called()

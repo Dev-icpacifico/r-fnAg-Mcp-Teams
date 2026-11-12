@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 
 import azure.functions as func
 import requests
@@ -23,7 +24,17 @@ class InvalidArguments(ValueError):
     pass
 
 
-def _arguments(context):
+# Identidad de quien llama al MCP. APIM la toma del token de Entra ya
+# validado (claim oid) y la entrega en el encabezado CALLER_HEADER y en el
+# argumento CALLER_ARGUMENT, sobrescribiendo cualquier valor del cliente.
+CALLER_HEADER = "x-icp-caller-oid"
+CALLER_ARGUMENT = "_icp_caller_oid"
+GUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _content(context):
     try:
         content = json.loads(context)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -32,7 +43,40 @@ def _arguments(context):
     if not isinstance(content, dict) or not isinstance(content.get("arguments"), dict):
         raise InvalidArguments("argumentos MCP inválidos")
 
-    return content["arguments"]
+    return content
+
+
+def _arguments(context):
+    return _content(context)["arguments"]
+
+
+def _transport_headers(content):
+    """Encabezados HTTP de la sesión MCP, si la extensión los expone."""
+    for container in (content.get("transport"), content):
+        if not isinstance(container, dict):
+            continue
+        props = container.get("properties")
+        for source in (props if isinstance(props, dict) else {}, container):
+            headers = source.get("headers") if isinstance(source, dict) else None
+            if isinstance(headers, dict):
+                return {str(k).lower(): v for k, v in headers.items()}
+    return {}
+
+
+def _caller_oid(content):
+    """oid de Entra de quien llama. Prefiere el encabezado (el modelo no
+    puede fijarlo); si la extensión no expone encabezados, usa el argumento
+    que APIM inyecta sobre el cuerpo JSON-RPC."""
+    value = _transport_headers(content).get(CALLER_HEADER)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    source = "header"
+    if not value:
+        value = content["arguments"].get(CALLER_ARGUMENT)
+        source = "argument"
+    if isinstance(value, str) and GUID_PATTERN.match(value.strip()):
+        return value.strip().lower(), source
+    return None, "missing"
 
 
 def _required_text(args, name, max_length):
@@ -248,3 +292,109 @@ def publicar_mensaje_teams(context) -> str:
             type(exc).__name__
         )
         return "Error ejecutando publicar_mensaje_teams"
+
+
+publicar_canal_properties = json.dumps([
+    {
+        "propertyName": "destino",
+        "propertyType": "string",
+        "description": "Alias del canal de Teams donde publicar. Por ejemplo: td_publicaciones.",
+        "isRequired": True
+    },
+    {
+        "propertyName": "mensaje",
+        "propertyType": "string",
+        "description": "Contenido del mensaje que se publicará en el canal.",
+        "isRequired": True
+    }
+])
+
+DIRECT_PUBLISH_ERROR_MESSAGES = {
+    401: "no se pudo identificar a la cuenta que publica",
+    403: "la cuenta conectada no está autorizada para publicar en ese canal",
+    404: "el destino no existe",
+}
+
+
+def _direct_publish_url():
+    url = os.getenv("TEAMS_PUBLISH_DIRECT_URL")
+    if url:
+        return url
+    base = os.getenv("TEAMS_PUBLISH_URL") or ""
+    if base.rstrip("/").endswith("/api/teams-publish"):
+        return base.rstrip("/") + "-direct"
+    return None
+
+
+@app.mcp_tool_trigger(
+    arg_name="context",
+    tool_name="publicar_en_canal_teams",
+    description=(
+        "Publica un mensaje en un canal de Microsoft Teams cuando la publicación "
+        "se inicia desde ChatGPT (una tarea programada o un pedido en esta "
+        "conversación) y no existe una solicitud de Teams con correlation_id. "
+        "Sólo funciona para cuentas autorizadas como publicadoras del canal. "
+        "Si la solicitud llegó desde Teams (hay correlation_id), usa "
+        "publicar_mensaje_teams."
+    ),
+    tool_properties=publicar_canal_properties,
+)
+def publicar_en_canal_teams(context) -> str:
+    try:
+        content = _content(context)
+        args = content["arguments"]
+        destino = _required_text(args, "destino", MAX_DESTINO_LENGTH)
+        mensaje = _required_text(args, "mensaje", MAX_MENSAJE_LENGTH)
+
+        caller_oid, source = _caller_oid(content)
+        if caller_oid is None:
+            logging.error(
+                "Publicación directa sin identidad. claves_contexto=%s",
+                sorted(content.keys()),
+            )
+            return "Error: no se pudo identificar a la cuenta que publica"
+
+        publish_url = _direct_publish_url()
+        publish_key = os.getenv("TEAMS_PUBLISH_KEY")
+        if not publish_url:
+            return "Error: TEAMS_PUBLISH_DIRECT_URL no configurada"
+        if not publish_key:
+            return "Error: TEAMS_PUBLISH_KEY no configurada"
+
+        response = requests.post(
+            publish_url,
+            json={"destino": destino, "mensaje": mensaje, "caller_oid": caller_oid},
+            headers={"x-publish-key": publish_key},
+            timeout=30,
+            allow_redirects=False,
+        )
+
+        if not 200 <= response.status_code < 300:
+            logging.error(
+                "Error en publicación directa. destino=%r status=%s origen_identidad=%s",
+                destino[:100],
+                response.status_code,
+                source,
+            )
+            detail = DIRECT_PUBLISH_ERROR_MESSAGES.get(response.status_code)
+            return (
+                "Error publicando mensaje en Teams. "
+                f"HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+            )
+
+        logging.info(
+            "Publicación directa correcta. destino=%r origen_identidad=%s",
+            destino[:100],
+            source,
+        )
+        return f"Mensaje publicado correctamente en Teams. destino={destino}"
+
+    except InvalidArguments as exc:
+        return f"Error: {exc}"
+    except requests.RequestException as exc:
+        logging.error("Error de conexión al Teams Adapter: %s", type(exc).__name__)
+        return "Error de conexión al Teams Adapter"
+    except Exception as exc:
+        logging.error("Error ejecutando publicar_en_canal_teams: %s", type(exc).__name__)
+        return "Error ejecutando publicar_en_canal_teams"
