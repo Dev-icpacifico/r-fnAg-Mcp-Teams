@@ -521,29 +521,29 @@ archivo_properties = json.dumps([
     {
         "propertyName": "titulo",
         "propertyType": "string",
-        "description": "Título del documento PDF (encabezado y nombre del archivo).",
+        "description": "Sólo con «contenido»: título del PDF simple que genera el bot.",
         "isRequired": False,
     },
     {
         "propertyName": "contenido",
         "propertyType": "string",
         "description": (
-            "Recomendado. Contenido del documento en markdown (títulos #, listas, "
-            "negritas, tablas | a | b |, enlaces). El bot genera el PDF con el "
-            "formato corporativo acordado."
+            "Alternativa sin archivo propio: texto en markdown (títulos #, listas, "
+            "tablas, enlaces) con el que el bot genera un PDF simple. No replica el "
+            "diseño del boletín; prefiere contenido_base64."
         ),
         "isRequired": False,
     },
     {
         "propertyName": "nombre_archivo",
         "propertyType": "string",
-        "description": "Opcional con contenido (se usa el título). Obligatorio con contenido_base64, con extensión.",
+        "description": "Nombre del archivo con extensión, por ejemplo Boletin_ICP_2026-11-19.pdf. Obligatorio con contenido_base64.",
         "isRequired": False,
     },
     {
         "propertyName": "contenido_base64",
         "propertyType": "string",
-        "description": "Sólo para archivos ya generados y pequeños: contenido en base64 (máximo 4 MB).",
+        "description": "Recomendado: el archivo que generaste (por ejemplo el PDF del boletín) codificado en base64, completo. Máximo 4 MB.",
         "isRequired": False,
     },
     {
@@ -639,10 +639,11 @@ def enviar_mensaje_directo_teams(context) -> str:
     arg_name="context",
     tool_name="enviar_archivo_teams",
     description=(
-        "Envía un documento al chat personal de una persona en Microsoft Teams. "
-        "Para PDF envía titulo y contenido (markdown) y el bot lo genera con el "
-        "formato acordado; contenido_base64 sólo para archivos pequeños ya "
-        "generados. Teams le pide aceptarlo y se guarda en su OneDrive. "
+        "Envía un archivo al chat personal de una persona en Microsoft Teams. "
+        "Envía el archivo que generaste en nombre_archivo + contenido_base64 "
+        "(máximo 4 MB). Sólo si no tienes archivo, titulo + contenido (markdown) "
+        "para que el bot genere un PDF simple. Teams le pide aceptarlo y se guarda "
+        "en su OneDrive. "
         + PERSONAL_DESCRIPTION
     ),
     tool_properties=archivo_properties,
