@@ -395,10 +395,30 @@ class PersonalToolsTests(unittest.TestCase):
             allow_redirects=False,
         )
 
-    def test_direct_message_without_correlation_sends_caller(self):
+    def test_direct_message_without_correlation_sends_caller_and_agent(self):
         self.call("enviar_mensaje_directo_teams", direct_context(
-            {"destinatario": "yo@icp.cl", "mensaje": "Hola"}, headers={"x-icp-caller-oid": OID}))
-        self.assertEqual(requests.post.call_args.kwargs["json"]["caller_oid"], OID.lower())
+            {"destinatario": "otro@icp.cl", "mensaje": "Hola", "agente": "noticias"},
+            headers={"x-icp-caller-oid": OID}))
+        body = requests.post.call_args.kwargs["json"]
+        self.assertEqual((body["caller_oid"], body["agente"]), (OID.lower(), "noticias"))
+
+    def test_without_correlation_the_agent_alias_is_required(self):
+        result = self.call("enviar_mensaje_directo_teams", direct_context(
+            {"destinatario": "otro@icp.cl", "mensaje": "Hola"}, headers={"x-icp-caller-oid": OID}))
+        self.assertIn("agente", result)
+        requests.post.assert_not_called()
+
+    def test_pdf_from_markdown_content(self):
+        result = self.call("enviar_archivo_teams", context(
+            destinatario="a@icp.cl", titulo="Noticias 19-11", contenido="# Hoy\n- dato",
+            correlation_id="corr-1"))
+        self.assertIn("Noticias 19-11", result)
+        body = requests.post.call_args.kwargs["json"]
+        self.assertEqual((body["formato"], body["titulo"], body["contenido"]), ("pdf", "Noticias 19-11", "# Hoy\n- dato"))
+        self.assertNotIn("contenido_base64", body)
+        missing_title = self.call("enviar_archivo_teams", context(
+            destinatario="a@icp.cl", contenido="x", correlation_id="c"))
+        self.assertIn("titulo", missing_title)
 
     def test_direct_message_without_identity_is_rejected(self):
         with self.assertLogs(level="ERROR"):

@@ -92,7 +92,8 @@ MENCIONES_PROPERTY = {
         "Opcional. Correos (o Object ID de Entra) de las personas a mencionar, "
         "separados por coma. En el mensaje escribe @correo donde quieras la "
         "mención; si no aparece, se menciona al inicio. Sólo se puede mencionar "
-        "a miembros del equipo del canal."
+        "a miembros del equipo del canal. Usa la palabra canal para mencionar "
+        "discretamente al canal completo (al final del mensaje, o donde escribas @canal)."
     ),
     "isRequired": False,
 }
@@ -475,11 +476,18 @@ DIRECT_MESSAGE_ERROR_MESSAGES = {
 }
 
 PERSONAL_DESCRIPTION = (
-    "Si la solicitud llegó desde Teams, envía su correlation_id: el "
-    "destinatario puede ser quien la hizo o alguien con acceso al mismo agente "
-    "en esa área. Sin correlation_id (desde ChatGPT) sólo puedes enviártelo a "
-    "ti mismo."
+    "Puede recibirlo cualquier persona de la empresa (no invitados). Si la "
+    "solicitud llegó desde Teams, envía su correlation_id. Si no (pedido "
+    "desde ChatGPT), indica tu alias de agente en «agente»: la cuenta "
+    "conectada debe tener acceso a ese agente."
 )
+
+AGENTE_PROPERTY = {
+    "propertyName": "agente",
+    "propertyType": "string",
+    "description": "Alias del agente que envía (por ejemplo noticias). Obligatorio si no hay correlation_id.",
+    "isRequired": False,
+}
 
 mensaje_directo_properties = json.dumps([
     {
@@ -500,6 +508,7 @@ mensaje_directo_properties = json.dumps([
         "description": "Identificador de la solicitud de Teams que originó el envío, si existe.",
         "isRequired": False,
     },
+    AGENTE_PROPERTY,
 ])
 
 archivo_properties = json.dumps([
@@ -510,16 +519,32 @@ archivo_properties = json.dumps([
         "isRequired": True,
     },
     {
+        "propertyName": "titulo",
+        "propertyType": "string",
+        "description": "Título del documento PDF (encabezado y nombre del archivo).",
+        "isRequired": False,
+    },
+    {
+        "propertyName": "contenido",
+        "propertyType": "string",
+        "description": (
+            "Recomendado. Contenido del documento en markdown (títulos #, listas, "
+            "negritas, tablas | a | b |, enlaces). El bot genera el PDF con el "
+            "formato corporativo acordado."
+        ),
+        "isRequired": False,
+    },
+    {
         "propertyName": "nombre_archivo",
         "propertyType": "string",
-        "description": "Nombre del archivo con extensión, por ejemplo informe_ventas.xlsx.",
-        "isRequired": True,
+        "description": "Opcional con contenido (se usa el título). Obligatorio con contenido_base64, con extensión.",
+        "isRequired": False,
     },
     {
         "propertyName": "contenido_base64",
         "propertyType": "string",
-        "description": "Contenido del archivo codificado en base64 (máximo 4 MB).",
-        "isRequired": True,
+        "description": "Sólo para archivos ya generados y pequeños: contenido en base64 (máximo 4 MB).",
+        "isRequired": False,
     },
     {
         "propertyName": "mensaje",
@@ -533,7 +558,10 @@ archivo_properties = json.dumps([
         "description": "Identificador de la solicitud de Teams que originó el envío, si existe.",
         "isRequired": False,
     },
+    AGENTE_PROPERTY,
 ])
+
+MAX_CONTENIDO_LENGTH = 200_000
 
 
 def _personal_payload(content, args):
@@ -550,6 +578,11 @@ def _personal_payload(content, args):
     elif not correlation_id:
         logging.error("Envío personal sin identidad ni correlation_id. origen=%s", source)
         raise InvalidArguments("no se pudo identificar a la cuenta que envía")
+    agente = _optional_text(args, "agente", 32)
+    if agente:
+        payload["agente"] = agente
+    elif not correlation_id:
+        raise InvalidArguments("sin correlation_id hay que indicar el alias del agente en «agente»")
     return payload
 
 
@@ -606,9 +639,11 @@ def enviar_mensaje_directo_teams(context) -> str:
     arg_name="context",
     tool_name="enviar_archivo_teams",
     description=(
-        "Envía un archivo (máximo 4 MB, en base64) al chat personal de una "
-        "persona en Microsoft Teams. Teams le pide aceptarlo y se guarda en su "
-        "OneDrive. " + PERSONAL_DESCRIPTION
+        "Envía un documento al chat personal de una persona en Microsoft Teams. "
+        "Para PDF envía titulo y contenido (markdown) y el bot lo genera con el "
+        "formato acordado; contenido_base64 sólo para archivos pequeños ya "
+        "generados. Teams le pide aceptarlo y se guarda en su OneDrive. "
+        + PERSONAL_DESCRIPTION
     ),
     tool_properties=archivo_properties,
 )
@@ -617,8 +652,17 @@ def enviar_archivo_teams(context) -> str:
         content = _content(context)
         args = content["arguments"]
         payload = _personal_payload(content, args)
-        payload["nombre_archivo"] = _required_text(args, "nombre_archivo", MAX_NOMBRE_ARCHIVO_LENGTH).strip()
-        payload["contenido_base64"] = _required_text(args, "contenido_base64", MAX_CONTENIDO_BASE64_LENGTH)
+        contenido = _optional_text(args, "contenido", MAX_CONTENIDO_LENGTH)
+        if contenido:
+            payload["formato"] = "pdf"
+            payload["contenido"] = contenido
+            payload["titulo"] = _required_text(args, "titulo", 150).strip()
+            nombre = _optional_text(args, "nombre_archivo", MAX_NOMBRE_ARCHIVO_LENGTH)
+            if nombre:
+                payload["nombre_archivo"] = nombre
+        else:
+            payload["nombre_archivo"] = _required_text(args, "nombre_archivo", MAX_NOMBRE_ARCHIVO_LENGTH).strip()
+            payload["contenido_base64"] = _required_text(args, "contenido_base64", MAX_CONTENIDO_BASE64_LENGTH)
         mensaje = _optional_text(args, "mensaje", 2_000)
         if mensaje:
             payload["mensaje"] = mensaje
@@ -627,7 +671,7 @@ def enviar_archivo_teams(context) -> str:
             return error
         logging.info("Archivo ofrecido por chat personal")
         return (
-            f"Archivo {payload['nombre_archivo']} enviado a {payload['destinatario']}. "
+            f"Archivo {payload.get('nombre_archivo') or payload.get('titulo')} enviado a {payload['destinatario']}. "
             "La persona debe aceptarlo en Teams para recibirlo."
         )
     except InvalidArguments as exc:
