@@ -51,7 +51,8 @@ class TeamsToolsTests(unittest.TestCase):
     def test_only_teams_tools_are_registered(self):
         self.assertEqual(
             set(function_app.app.tool_names),
-            {"enviar_respuesta_teams", "publicar_mensaje_teams", "publicar_en_canal_teams"},
+            {"enviar_respuesta_teams", "publicar_mensaje_teams", "publicar_en_canal_teams",
+             "enviar_mensaje_directo_teams", "enviar_archivo_teams"},
         )
 
     def test_server_metadata_describes_teams(self):
@@ -367,3 +368,71 @@ class DirectPublishTests(unittest.TestCase):
         for ctx in ("{", direct_context({"destino": "", "mensaje": "hola", "_icp_caller_oid": OID})):
             self.assertIn("Error:", self.call(ctx))
         requests.post.assert_not_called()
+
+
+PERSONAL_ENV = {"TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish", "TEAMS_PUBLISH_KEY": "key"}
+
+
+class PersonalToolsTests(unittest.TestCase):
+    def setUp(self):
+        requests.post.reset_mock()
+        requests.post.side_effect = None
+        requests.post.return_value = types.SimpleNamespace(status_code=200)
+
+    def call(self, tool, ctx, env=PERSONAL_ENV):
+        with patch.dict(os.environ, env, clear=True):
+            return getattr(function_app, tool)(ctx)
+
+    def test_direct_message_with_correlation(self):
+        result = self.call("enviar_mensaje_directo_teams", context(
+            destinatario="lpizarro@icp.cl", mensaje="Hola", correlation_id="corr-1"))
+        self.assertIn("enviado", result)
+        requests.post.assert_called_once_with(
+            "https://example.test/api/teams-direct-message",
+            json={"destinatario": "lpizarro@icp.cl", "correlation_id": "corr-1", "mensaje": "Hola"},
+            headers={"x-publish-key": "key"},
+            timeout=60,
+            allow_redirects=False,
+        )
+
+    def test_direct_message_without_correlation_sends_caller(self):
+        self.call("enviar_mensaje_directo_teams", direct_context(
+            {"destinatario": "yo@icp.cl", "mensaje": "Hola"}, headers={"x-icp-caller-oid": OID}))
+        self.assertEqual(requests.post.call_args.kwargs["json"]["caller_oid"], OID.lower())
+
+    def test_direct_message_without_identity_is_rejected(self):
+        with self.assertLogs(level="ERROR"):
+            result = self.call("enviar_mensaje_directo_teams", context(destinatario="a@icp.cl", mensaje="x"))
+        self.assertIn("identificar", result)
+        requests.post.assert_not_called()
+
+    def test_file_is_forwarded_with_its_own_url(self):
+        result = self.call("enviar_archivo_teams", context(
+            destinatario="a@icp.cl", nombre_archivo="informe.pdf", contenido_base64="JVBERg==",
+            mensaje="Informe", correlation_id="corr-1"))
+        self.assertIn("debe aceptarlo", result)
+        self.assertEqual(requests.post.call_args.args[0], "https://example.test/api/teams-file")
+        body = requests.post.call_args.kwargs["json"]
+        self.assertEqual((body["nombre_archivo"], body["contenido_base64"], body["mensaje"]),
+                         ("informe.pdf", "JVBERg==", "Informe"))
+
+    def test_adapter_error_message_reaches_the_agent(self):
+        requests.post.return_value = types.SimpleNamespace(
+            status_code=403, json=lambda: {"error": "La persona no tiene acceso a este agente"})
+        with self.assertLogs(level="ERROR"):
+            result = self.call("enviar_mensaje_directo_teams", context(
+                destinatario="a@icp.cl", mensaje="x", correlation_id="c"))
+        self.assertIn("HTTP 403: La persona no tiene acceso", result)
+
+    def test_mentions_are_forwarded_only_when_present(self):
+        with patch.dict(os.environ, {"TEAMS_PUBLISH_URL": "https://example.test/api/teams-publish",
+                                     "TEAMS_PUBLISH_KEY": "key"}, clear=True):
+            function_app.publicar_mensaje_teams(context(destino="td", mensaje="hola @a@icp.cl",
+                                                        menciones=["a@icp.cl", "b@icp.cl"]))
+            self.assertEqual(requests.post.call_args.kwargs["json"]["menciones"], "a@icp.cl,b@icp.cl")
+            function_app.publicar_mensaje_teams(context(destino="td", mensaje="hola"))
+            self.assertNotIn("menciones", requests.post.call_args.kwargs["json"])
+        with patch.dict(os.environ, {"TEAMS_CALLBACK_URL": "https://example.test/cb",
+                                     "TEAMS_CALLBACK_KEY": "k"}, clear=True):
+            function_app.enviar_respuesta_teams(context(respuesta="r", correlation_id="c", menciones="a@icp.cl"))
+            self.assertEqual(requests.post.call_args.kwargs["json"]["menciones"], "a@icp.cl")

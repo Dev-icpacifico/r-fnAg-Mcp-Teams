@@ -79,6 +79,61 @@ def _caller_oid(content):
     return None, "missing"
 
 
+MAX_MENCIONES_LENGTH = 2_000
+MAX_DESTINATARIO_LENGTH = 320
+MAX_NOMBRE_ARCHIVO_LENGTH = 200
+# 4 MB en base64 ocupan ~5,6 millones de caracteres.
+MAX_CONTENIDO_BASE64_LENGTH = 5_600_000
+
+MENCIONES_PROPERTY = {
+    "propertyName": "menciones",
+    "propertyType": "string",
+    "description": (
+        "Opcional. Correos (o Object ID de Entra) de las personas a mencionar, "
+        "separados por coma. En el mensaje escribe @correo donde quieras la "
+        "mención; si no aparece, se menciona al inicio. Sólo se puede mencionar "
+        "a miembros del equipo del canal."
+    ),
+    "isRequired": False,
+}
+
+
+def _optional_text(args, name, max_length):
+    value = args.get(name)
+    if value in (None, ""):
+        return None
+    if isinstance(value, list):
+        value = ",".join(str(v) for v in value)
+    if not isinstance(value, str):
+        raise InvalidArguments(f"{name} debe ser texto")
+    if len(value) > max_length:
+        raise InvalidArguments(f"{name} supera el tamaño permitido")
+    return value.strip() or None
+
+
+def _adapter_detail(response, known):
+    """Mensaje para el agente: el conocido para el código o el del adaptador."""
+    detail = known.get(response.status_code)
+    if detail:
+        return detail
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return str(error)[:300] if error else None
+
+
+def _adapter_url(env_name, suffix):
+    url = os.getenv(env_name)
+    if url:
+        return url
+    base = (os.getenv("TEAMS_PUBLISH_URL") or "").rstrip("/")
+    if base.endswith("/api/teams-publish"):
+        return base[: -len("/api/teams-publish")] + suffix
+    return None
+
+
 def _required_text(args, name, max_length):
     value = args.get(name)
     if not isinstance(value, str) or not value.strip():
@@ -99,7 +154,8 @@ teams_tool_properties = json.dumps([
         "propertyType": "string",
         "description": "Identificador de correlación de la conversación de Teams.",
         "isRequired": True
-    }
+    },
+    MENCIONES_PROPERTY,
 ])
 
 
@@ -114,6 +170,7 @@ def enviar_respuesta_teams(context) -> str:
         args = _arguments(context)
         respuesta = _required_text(args, "respuesta", MAX_RESPUESTA_LENGTH)
         correlation_id = _required_text(args, "correlation_id", MAX_CORRELATION_ID_LENGTH)
+        menciones = _optional_text(args, "menciones", MAX_MENCIONES_LENGTH)
 
         callback_url = os.getenv("TEAMS_CALLBACK_URL")
         callback_key = os.getenv("TEAMS_CALLBACK_KEY")
@@ -123,9 +180,12 @@ def enviar_respuesta_teams(context) -> str:
         if not callback_key:
             return "Error: TEAMS_CALLBACK_KEY no configurada"
 
+        payload = {"respuesta": respuesta, "correlation_id": correlation_id}
+        if menciones:
+            payload["menciones"] = menciones
         response = requests.post(
             callback_url,
-            json={"respuesta": respuesta, "correlation_id": correlation_id},
+            json=payload,
             headers={"x-callback-key": callback_key},
             timeout=30,
             allow_redirects=False,
@@ -137,7 +197,7 @@ def enviar_respuesta_teams(context) -> str:
                 correlation_id[:128],
                 response.status_code,
             )
-            detail = CALLBACK_ERROR_MESSAGES.get(response.status_code)
+            detail = _adapter_detail(response, CALLBACK_ERROR_MESSAGES)
             return (
                 f"Error enviando respuesta a Teams. HTTP {response.status_code}"
                 + (f": {detail}" if detail else "")
@@ -181,7 +241,8 @@ publicar_teams_properties = json.dumps([
             "área que esa solicitud (ver destinos_permitidos en la solicitud)."
         ),
         "isRequired": False
-    }
+    },
+    MENCIONES_PROPERTY,
 ])
 
 PUBLISH_ERROR_MESSAGES = {
@@ -241,6 +302,10 @@ def publicar_mensaje_teams(context) -> str:
         if correlation_id:
             payload["correlation_id"] = correlation_id
 
+        menciones = _optional_text(args, "menciones", MAX_MENCIONES_LENGTH)
+        if menciones:
+            payload["menciones"] = menciones
+
         response = requests.post(
             publish_url,
             json=payload,
@@ -258,7 +323,7 @@ def publicar_mensaje_teams(context) -> str:
                 response.status_code,
             )
 
-            detail = PUBLISH_ERROR_MESSAGES.get(response.status_code)
+            detail = _adapter_detail(response, PUBLISH_ERROR_MESSAGES)
 
             return (
                 "Error publicando mensaje en Teams. "
@@ -306,7 +371,8 @@ publicar_canal_properties = json.dumps([
         "propertyType": "string",
         "description": "Contenido del mensaje que se publicará en el canal.",
         "isRequired": True
-    }
+    },
+    MENCIONES_PROPERTY,
 ])
 
 DIRECT_PUBLISH_ERROR_MESSAGES = {
@@ -361,9 +427,13 @@ def publicar_en_canal_teams(context) -> str:
         if not publish_key:
             return "Error: TEAMS_PUBLISH_KEY no configurada"
 
+        payload = {"destino": destino, "mensaje": mensaje, "caller_oid": caller_oid}
+        menciones = _optional_text(args, "menciones", MAX_MENCIONES_LENGTH)
+        if menciones:
+            payload["menciones"] = menciones
         response = requests.post(
             publish_url,
-            json={"destino": destino, "mensaje": mensaje, "caller_oid": caller_oid},
+            json=payload,
             headers={"x-publish-key": publish_key},
             timeout=30,
             allow_redirects=False,
@@ -376,7 +446,7 @@ def publicar_en_canal_teams(context) -> str:
                 response.status_code,
                 source,
             )
-            detail = DIRECT_PUBLISH_ERROR_MESSAGES.get(response.status_code)
+            detail = _adapter_detail(response, DIRECT_PUBLISH_ERROR_MESSAGES)
             return (
                 "Error publicando mensaje en Teams. "
                 f"HTTP {response.status_code}"
@@ -398,3 +468,173 @@ def publicar_en_canal_teams(context) -> str:
     except Exception as exc:
         logging.error("Error ejecutando publicar_en_canal_teams: %s", type(exc).__name__)
         return "Error ejecutando publicar_en_canal_teams"
+
+
+DIRECT_MESSAGE_ERROR_MESSAGES = {
+    401: "no se pudo identificar a la cuenta que envía",
+}
+
+PERSONAL_DESCRIPTION = (
+    "Si la solicitud llegó desde Teams, envía su correlation_id: el "
+    "destinatario puede ser quien la hizo o alguien con acceso al mismo agente "
+    "en esa área. Sin correlation_id (desde ChatGPT) sólo puedes enviártelo a "
+    "ti mismo."
+)
+
+mensaje_directo_properties = json.dumps([
+    {
+        "propertyName": "destinatario",
+        "propertyType": "string",
+        "description": "Correo (o Object ID de Entra) de la persona que recibirá el mensaje.",
+        "isRequired": True,
+    },
+    {
+        "propertyName": "mensaje",
+        "propertyType": "string",
+        "description": "Texto del mensaje (admite formato markdown y enlaces).",
+        "isRequired": True,
+    },
+    {
+        "propertyName": "correlation_id",
+        "propertyType": "string",
+        "description": "Identificador de la solicitud de Teams que originó el envío, si existe.",
+        "isRequired": False,
+    },
+])
+
+archivo_properties = json.dumps([
+    {
+        "propertyName": "destinatario",
+        "propertyType": "string",
+        "description": "Correo (o Object ID de Entra) de la persona que recibirá el archivo.",
+        "isRequired": True,
+    },
+    {
+        "propertyName": "nombre_archivo",
+        "propertyType": "string",
+        "description": "Nombre del archivo con extensión, por ejemplo informe_ventas.xlsx.",
+        "isRequired": True,
+    },
+    {
+        "propertyName": "contenido_base64",
+        "propertyType": "string",
+        "description": "Contenido del archivo codificado en base64 (máximo 4 MB).",
+        "isRequired": True,
+    },
+    {
+        "propertyName": "mensaje",
+        "propertyType": "string",
+        "description": "Opcional. Texto que acompaña al archivo.",
+        "isRequired": False,
+    },
+    {
+        "propertyName": "correlation_id",
+        "propertyType": "string",
+        "description": "Identificador de la solicitud de Teams que originó el envío, si existe.",
+        "isRequired": False,
+    },
+])
+
+
+def _personal_payload(content, args):
+    """Destinatario, solicitud de origen e identidad de quien llama."""
+    payload = {
+        "destinatario": _required_text(args, "destinatario", MAX_DESTINATARIO_LENGTH).strip(),
+    }
+    correlation_id = _optional_text(args, "correlation_id", MAX_CORRELATION_ID_LENGTH)
+    if correlation_id:
+        payload["correlation_id"] = correlation_id
+    caller_oid, source = _caller_oid(content)
+    if caller_oid:
+        payload["caller_oid"] = caller_oid
+    elif not correlation_id:
+        logging.error("Envío personal sin identidad ni correlation_id. origen=%s", source)
+        raise InvalidArguments("no se pudo identificar a la cuenta que envía")
+    return payload
+
+
+def _post_personal(env_name, suffix, payload, tool):
+    url = _adapter_url(env_name, suffix)
+    key = os.getenv("TEAMS_PUBLISH_KEY")
+    if not url:
+        return None, f"Error: {env_name} no configurada"
+    if not key:
+        return None, "Error: TEAMS_PUBLISH_KEY no configurada"
+    response = requests.post(
+        url, json=payload, headers={"x-publish-key": key}, timeout=60, allow_redirects=False,
+    )
+    if not 200 <= response.status_code < 300:
+        logging.error("Error en %s. status=%s", tool, response.status_code)
+        detail = _adapter_detail(response, DIRECT_MESSAGE_ERROR_MESSAGES)
+        return None, f"Error en {tool}. HTTP {response.status_code}" + (f": {detail}" if detail else "")
+    return response, None
+
+
+@app.mcp_tool_trigger(
+    arg_name="context",
+    tool_name="enviar_mensaje_directo_teams",
+    description=(
+        "Envía un mensaje al chat personal de una persona en Microsoft Teams, "
+        "aunque no haya escrito antes al bot. " + PERSONAL_DESCRIPTION
+    ),
+    tool_properties=mensaje_directo_properties,
+)
+def enviar_mensaje_directo_teams(context) -> str:
+    try:
+        content = _content(context)
+        args = content["arguments"]
+        payload = _personal_payload(content, args)
+        payload["mensaje"] = _required_text(args, "mensaje", MAX_MENSAJE_LENGTH)
+        _, error = _post_personal(
+            "TEAMS_DIRECT_MESSAGE_URL", "/api/teams-direct-message", payload, "enviar_mensaje_directo_teams"
+        )
+        if error:
+            return error
+        logging.info("Mensaje directo enviado")
+        return f"Mensaje directo enviado a {payload['destinatario']}."
+    except InvalidArguments as exc:
+        return f"Error: {exc}"
+    except requests.RequestException as exc:
+        logging.error("Error de conexión al Teams Adapter: %s", type(exc).__name__)
+        return "Error de conexión al Teams Adapter"
+    except Exception as exc:
+        logging.error("Error ejecutando enviar_mensaje_directo_teams: %s", type(exc).__name__)
+        return "Error ejecutando enviar_mensaje_directo_teams"
+
+
+@app.mcp_tool_trigger(
+    arg_name="context",
+    tool_name="enviar_archivo_teams",
+    description=(
+        "Envía un archivo (máximo 4 MB, en base64) al chat personal de una "
+        "persona en Microsoft Teams. Teams le pide aceptarlo y se guarda en su "
+        "OneDrive. " + PERSONAL_DESCRIPTION
+    ),
+    tool_properties=archivo_properties,
+)
+def enviar_archivo_teams(context) -> str:
+    try:
+        content = _content(context)
+        args = content["arguments"]
+        payload = _personal_payload(content, args)
+        payload["nombre_archivo"] = _required_text(args, "nombre_archivo", MAX_NOMBRE_ARCHIVO_LENGTH).strip()
+        payload["contenido_base64"] = _required_text(args, "contenido_base64", MAX_CONTENIDO_BASE64_LENGTH)
+        mensaje = _optional_text(args, "mensaje", 2_000)
+        if mensaje:
+            payload["mensaje"] = mensaje
+        _, error = _post_personal("TEAMS_FILE_URL", "/api/teams-file", payload, "enviar_archivo_teams")
+        if error:
+            return error
+        logging.info("Archivo ofrecido por chat personal")
+        return (
+            f"Archivo {payload['nombre_archivo']} enviado a {payload['destinatario']}. "
+            "La persona debe aceptarlo en Teams para recibirlo."
+        )
+    except InvalidArguments as exc:
+        return f"Error: {exc}"
+    except requests.RequestException as exc:
+        logging.error("Error de conexión al Teams Adapter: %s", type(exc).__name__)
+        return "Error de conexión al Teams Adapter"
+    except Exception as exc:
+        logging.error("Error ejecutando enviar_archivo_teams: %s", type(exc).__name__)
+        return "Error ejecutando enviar_archivo_teams"
