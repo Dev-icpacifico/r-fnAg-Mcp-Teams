@@ -92,8 +92,8 @@ MENCIONES_PROPERTY = {
         "Opcional. Correos (o Object ID de Entra) de las personas a mencionar, "
         "separados por coma. En el mensaje escribe @correo donde quieras la "
         "mención; si no aparece, se menciona al inicio. Sólo se puede mencionar "
-        "a miembros del equipo del canal. Usa la palabra canal para mencionar "
-        "discretamente al canal completo (al final del mensaje, o donde escribas @canal)."
+        "a miembros del equipo del canal. Teams no permite mencionar el canal ni "
+        "a todo el equipo."
     ),
     "isRequired": False,
 }
