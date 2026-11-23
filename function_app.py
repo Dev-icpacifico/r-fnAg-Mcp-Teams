@@ -79,6 +79,7 @@ def _caller_oid(content):
     return None, "missing"
 
 
+MAX_ADAPTER_DETAIL_LENGTH = 1_000
 MAX_MENCIONES_LENGTH = 2_000
 MAX_DESTINATARIO_LENGTH = 320
 MAX_NOMBRE_ARCHIVO_LENGTH = 200
@@ -113,16 +114,20 @@ def _optional_text(args, name, max_length):
 
 
 def _adapter_detail(response, known):
-    """Mensaje para el agente: el conocido para el código o el del adaptador."""
-    detail = known.get(response.status_code)
-    if detail:
-        return detail
+    """Mensaje para el agente.
+
+    Prefiere el texto del adaptador, que explica el motivo concreto y cómo
+    solicitar el acceso (grupo de Entra que falta, canal no habilitado,
+    etc.); si no viene, usa el genérico conocido para el código HTTP.
+    """
     try:
         body = response.json()
     except Exception:  # noqa: BLE001
-        return None
+        body = None
     error = body.get("error") if isinstance(body, dict) else None
-    return str(error)[:300] if error else None
+    if error:
+        return str(error)[:MAX_ADAPTER_DETAIL_LENGTH]
+    return known.get(response.status_code)
 
 
 def _adapter_url(env_name, suffix):

@@ -364,6 +364,19 @@ class DirectPublishTests(unittest.TestCase):
         self.assertNotIn("contenido privado", joined)
         self.assertNotIn("detalle interno", joined)
 
+    def test_adapter_explanation_wins_over_generic_message(self):
+        explicacion = (
+            "No tienes permiso para publicar en «td»: necesitas pertenecer al grupo de Entra "
+            "«r-grpAg-TeamsTD-MCP». Para solicitarlo, escribe «solicitar» mencionando al bot."
+        )
+        requests.post.return_value = types.SimpleNamespace(
+            status_code=403, json=lambda: {"error": explicacion})
+        with self.assertLogs(level="ERROR"):
+            result = self.call(direct_context(
+                {"destino": "td", "mensaje": "hola", "_icp_caller_oid": OID}))
+        self.assertIn("HTTP 403: " + explicacion, result)
+        self.assertNotIn("no está autorizada", result)
+
     def test_invalid_arguments_do_not_send(self):
         for ctx in ("{", direct_context({"destino": "", "mensaje": "hola", "_icp_caller_oid": OID})):
             self.assertIn("Error:", self.call(ctx))
